@@ -1,0 +1,27 @@
+# Task YAML Schema
+# Antigravity generates this file, Claude Code reads it
+
+# Example task file: .ai-pilot/tasks/task-001.yaml
+
+# --- Required fields ---
+id: task-001                          # Unique task ID
+type: bug-fix                         # bug-fix | feature | refactor | review | test | docs
+description: "Fix null pointer crash" # What to do (1-2 sentences)
+files:                                # Files to modify
+  - src/auth/login.ts
+
+# --- Optional fields ---
+priority: high                        # high | medium | low
+context: "User reports crash on login when email is null"
+constraints:
+  - Don't change other files
+  - Follow existing patterns
+  - Keep tests passing
+reference_files:                      # Files to read for context (don't modify)
+  - src/auth/types.ts
+tests:
+  - npm test
+  - npm run lint
+accept_criteria:                      # When is this task "done"?
+  - "No null pointer exception"
+  - "All tests pass"

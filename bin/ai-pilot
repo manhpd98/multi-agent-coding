@@ -5,6 +5,7 @@
 # Usage:
 #   ai-pilot init                          Copy .agent/ into current project
 #   ai-pilot delegate <worker> "<task>"    Delegate a coding task
+#   ai-pilot task <worker> "<description>" Protocol-based task (YAML→worker→JSON)
 #   ai-pilot review [files...]             Run AI code review
 #   ai-pilot status                        Check installed workers
 #   ai-pilot log                           View recent delegation sessions
@@ -74,6 +75,7 @@ cmd_help() {
     echo -e "${BOLD}COMMANDS${NC}"
     echo -e "  ${GREEN}init${NC}                            Install .agent/ into current project"
     echo -e "  ${GREEN}delegate${NC} <worker> \"<task>\"      Delegate a task to an AI worker"
+    echo -e "  ${GREEN}task${NC} <worker> \"<description>\"    Protocol-based task (YAML → worker → result JSON)"
     echo -e "  ${GREEN}review${NC} [files...]               Run AI code review on files"
     echo -e "  ${GREEN}status${NC}                          Check which AI workers are installed"
     echo -e "  ${GREEN}log${NC}                             View recent delegation sessions"
@@ -93,6 +95,9 @@ cmd_help() {
     echo ""
     echo -e "  ${DIM}# Delegate a bug fix to Claude Code${NC}"
     echo -e "  ai-pilot delegate claude \"Fix null pointer in src/auth.ts line 42\""
+    echo ""
+    echo -e "  ${DIM}# Protocol-based task with YAML + result JSON${NC}"
+    echo -e "  ai-pilot task claude \"Fix null pointer in src/auth.ts line 42\""
     echo ""
     echo -e "  ${DIM}# Review recent changes${NC}"
     echo -e "  ai-pilot review src/api/user.ts src/api/auth.ts"
@@ -186,6 +191,169 @@ cmd_status() {
         success "$count worker(s) ready"
     fi
     echo ""
+}
+
+cmd_task() {
+    ensure_project
+
+    if [ $# -lt 2 ]; then
+        error "Usage: ai-pilot task <worker> \"<description>\""
+        echo ""
+        echo -e "  Workers: ${CYAN}claude${NC}, ${CYAN}opencode${NC}, ${CYAN}aider${NC}"
+        echo ""
+        echo -e "  Example: ai-pilot task claude \"Fix null pointer in src/auth.ts\""
+        exit 1
+    fi
+
+    local worker="$1"
+    local description="$2"
+
+    if [ -z "$description" ]; then
+        error "Task description cannot be empty."
+        exit 1
+    fi
+
+    # Generate task ID
+    local task_id="task-$(date +%s)"
+    local tasks_dir=".ai-pilot/tasks"
+    local results_dir=".ai-pilot/results"
+
+    mkdir -p "$tasks_dir" "$results_dir"
+
+    # Auto-detect type from keywords
+    local task_type="feature"
+    case "$description" in
+        *fix*|*Fix*|*bug*|*Bug*|*FIX*|*BUG*)
+            task_type="bug-fix" ;;
+        *refactor*|*Refactor*|*REFACTOR*)
+            task_type="refactor" ;;
+        *test*|*Test*|*TEST*)
+            task_type="test" ;;
+        *review*|*Review*|*REVIEW*)
+            task_type="review" ;;
+    esac
+
+    # Auto-detect file paths from description (matches paths like src/foo.ts, lib/bar.py, etc.)
+    local files_yaml=""
+    local detected_files
+    detected_files=$(echo "$description" | grep -oE '[a-zA-Z0-9_./-]+\.[a-zA-Z]{1,5}' | sort -u || true)
+    if [ -n "$detected_files" ]; then
+        files_yaml="files:"$'\n'
+        while IFS= read -r f; do
+            files_yaml+="  - $f"$'\n'
+        done <<< "$detected_files"
+    else
+        files_yaml="files: []"$'\n'
+    fi
+
+    # Write task YAML
+    cat > "$tasks_dir/$task_id.yaml" <<YAML
+id: $task_id
+type: $task_type
+${files_yaml}description: "$description"
+constraints:
+  - Don't change unrelated files
+  - Follow existing code patterns
+  - Keep tests passing
+YAML
+
+    echo ""
+    echo -e "${BOLD}🤖 AI Pilot — Task Protocol${NC}"
+    echo -e "  Task ID: ${CYAN}$task_id${NC}"
+    echo -e "  Type:    $task_type"
+    echo -e "  Worker:  ${CYAN}$worker${NC}"
+    echo -e "  Desc:    $description"
+    echo ""
+
+    log_session "$worker" "$task_id: $description" "started"
+
+    # Build worker prompt
+    local prompt="Read .ai-pilot/tasks/$task_id.yaml and execute the task. Write result to .ai-pilot/results/$task_id.json following the schema in .ai-pilot/schema/result.json"
+
+    # Validate worker and run
+    local exit_code=0
+    set +e
+
+    case "$worker" in
+        claude)
+            if ! command -v claude &>/dev/null; then
+                error "Claude Code is not installed."
+                echo -e "  Install: ${CYAN}npm install -g @anthropic-ai/claude-code${NC}"
+                exit 1
+            fi
+            info "Sending task to Claude Code..."
+            echo ""
+            claude -p "$prompt"
+            ;;
+        opencode)
+            if ! command -v opencode &>/dev/null; then
+                error "OpenCode is not installed."
+                echo -e "  Install: ${CYAN}curl -fsSL https://opencode.ai/install | bash${NC}"
+                exit 1
+            fi
+            info "Sending task to OpenCode..."
+            echo ""
+            opencode run "$prompt"
+            ;;
+        aider)
+            if ! command -v aider &>/dev/null; then
+                error "Aider is not installed."
+                echo -e "  Install: ${CYAN}pip install aider-chat${NC}"
+                exit 1
+            fi
+            info "Sending task to Aider..."
+            echo ""
+            aider --message "$prompt" --yes
+            ;;
+        *)
+            error "Unknown worker: $worker"
+            echo -e "  Available: ${CYAN}claude${NC}, ${CYAN}opencode${NC}, ${CYAN}aider${NC}"
+            exit 1
+            ;;
+    esac
+    exit_code=$?
+
+    set -e
+
+    echo ""
+
+    # Check for result JSON
+    local result_file="$results_dir/$task_id.json"
+    if [ -f "$result_file" ]; then
+        log_session "$worker" "$task_id: $description" "completed"
+        success "Task completed — result written to $result_file"
+        echo ""
+
+        # Parse and display result
+        if command -v python3 &>/dev/null; then
+            local status summary files_changed
+            status=$(python3 -c "import json; d=json.load(open('$result_file')); print(d.get('status','unknown'))" 2>/dev/null || echo "unknown")
+            summary=$(python3 -c "import json; d=json.load(open('$result_file')); print(d.get('summary',''))" 2>/dev/null || echo "")
+            files_changed=$(python3 -c "import json; d=json.load(open('$result_file')); print(', '.join(d.get('files_changed',[])))" 2>/dev/null || echo "")
+
+            echo -e "  ${BOLD}Status:${NC}  $status"
+            [ -n "$summary" ] && echo -e "  ${BOLD}Summary:${NC} $summary"
+            [ -n "$files_changed" ] && echo -e "  ${BOLD}Files:${NC}   $files_changed"
+        else
+            # Fallback: just cat the result
+            cat "$result_file"
+        fi
+        echo ""
+
+        # Run on-complete hook if it exists
+        if [ -x ".ai-pilot/hooks/on-complete.sh" ]; then
+            info "Running on-complete hook..."
+            .ai-pilot/hooks/on-complete.sh "$task_id" "$result_file"
+        fi
+    else
+        if [ $exit_code -eq 0 ]; then
+            warn "Worker finished but no result file found at $result_file"
+            log_session "$worker" "$task_id: $description" "no-result"
+        else
+            error "Task failed (exit code: $exit_code)"
+            log_session "$worker" "$task_id: $description" "failed"
+        fi
+    fi
 }
 
 cmd_delegate() {
@@ -499,6 +667,7 @@ shift || true
 case "$COMMAND" in
     init)       cmd_init "$@" ;;
     delegate)   cmd_delegate "$@" ;;
+    task)       cmd_task "$@" ;;
     review)     cmd_review "$@" ;;
     status)     cmd_status "$@" ;;
     log|logs)   cmd_log "$@" ;;

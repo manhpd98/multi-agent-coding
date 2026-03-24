@@ -1,0 +1,25 @@
+{
+  "$schema": "Result JSON Schema — Claude Code writes this after completing a task",
+  "example": {
+    "task_id": "task-001",
+    "status": "completed",
+    "files_changed": ["src/auth/login.ts"],
+    "summary": "Added null check before accessing user.email at line 42",
+    "lines_changed": 3,
+    "tests_passed": true,
+    "errors": [],
+    "assumptions": [],
+    "additional_files": []
+  },
+  "fields": {
+    "task_id": "string — must match the task YAML id",
+    "status": "completed | failed | partial",
+    "files_changed": "string[] — files that were modified",
+    "summary": "string — 1-2 sentence summary of changes",
+    "lines_changed": "number — total lines added/modified/removed",
+    "tests_passed": "boolean — did tests pass after changes",
+    "errors": "string[] — any errors encountered",
+    "assumptions": "string[] — assumptions made when task was ambiguous",
+    "additional_files": "string[] — files that need changes but were out of scope"
+  }
+}

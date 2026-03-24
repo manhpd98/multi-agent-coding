@@ -1,0 +1,14 @@
+# AI Pilot — Generated files
+.ai-pilot/logs/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

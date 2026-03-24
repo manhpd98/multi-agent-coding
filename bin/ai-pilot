@@ -1,0 +1,514 @@
+#!/usr/bin/env bash
+#
+# ai-pilot — CLI for Multi-Agent Coding Workflow
+#
+# Usage:
+#   ai-pilot init                          Copy .agent/ into current project
+#   ai-pilot delegate <worker> "<task>"    Delegate a coding task
+#   ai-pilot review [files...]             Run AI code review
+#   ai-pilot status                        Check installed workers
+#   ai-pilot log                           View recent delegation sessions
+#   ai-pilot update                        Update .agent/ from GitHub
+#   ai-pilot uninstall                     Remove .agent/ from project
+#   ai-pilot help                          Show this help
+#
+
+set -euo pipefail
+
+VERSION="1.1.0"
+
+# ─────────────────────────────────────────────
+# Colors
+# ─────────────────────────────────────────────
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m'
+
+info()    { echo -e "${BLUE}ℹ${NC}  $1"; }
+success() { echo -e "${GREEN}✅${NC} $1"; }
+warn()    { echo -e "${YELLOW}⚠️${NC}  $1"; }
+error()   { echo -e "${RED}❌${NC} $1" >&2; }
+
+# ─────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────
+LOG_DIR=".ai-pilot/logs"
+
+ensure_project() {
+    if [ ! -d ".agent" ]; then
+        error "No .agent/ directory found. Run ${CYAN}ai-pilot init${NC} first."
+        exit 1
+    fi
+}
+
+timestamp() {
+    date "+%Y-%m-%d %H:%M:%S"
+}
+
+log_session() {
+    local worker="$1"
+    local task="$2"
+    local status="$3"
+    
+    mkdir -p "$LOG_DIR"
+    local log_file="$LOG_DIR/$(date +%Y-%m-%d).log"
+    echo "[$(timestamp)] worker=$worker status=$status task=\"$task\"" >> "$log_file"
+}
+
+# ─────────────────────────────────────────────
+# Commands
+# ─────────────────────────────────────────────
+
+cmd_help() {
+    echo ""
+    echo -e "${CYAN}${BOLD}🤖 AI Pilot${NC} v$VERSION — Multi-Agent Coding Workflow"
+    echo ""
+    echo -e "${BOLD}USAGE${NC}"
+    echo -e "  ai-pilot <command> [options]"
+    echo ""
+    echo -e "${BOLD}COMMANDS${NC}"
+    echo -e "  ${GREEN}init${NC}                            Install .agent/ into current project"
+    echo -e "  ${GREEN}delegate${NC} <worker> \"<task>\"      Delegate a task to an AI worker"
+    echo -e "  ${GREEN}review${NC} [files...]               Run AI code review on files"
+    echo -e "  ${GREEN}status${NC}                          Check which AI workers are installed"
+    echo -e "  ${GREEN}log${NC}                             View recent delegation sessions"
+    echo -e "  ${GREEN}update${NC}                          Update .agent/ from GitHub"
+    echo -e "  ${GREEN}uninstall${NC}                       Remove .agent/ from project"
+    echo -e "  ${GREEN}help${NC}                            Show this help message"
+    echo -e "  ${GREEN}version${NC}                         Show version"
+    echo ""
+    echo -e "${BOLD}WORKERS${NC}"
+    echo -e "  ${CYAN}claude${NC}     Claude Code (claude -p \"...\")"
+    echo -e "  ${CYAN}opencode${NC}   OpenCode (opencode run \"...\")"
+    echo -e "  ${CYAN}aider${NC}      Aider (aider --message \"...\")"
+    echo ""
+    echo -e "${BOLD}EXAMPLES${NC}"
+    echo -e "  ${DIM}# Install AI Pilot into your project${NC}"
+    echo -e "  ai-pilot init"
+    echo ""
+    echo -e "  ${DIM}# Delegate a bug fix to Claude Code${NC}"
+    echo -e "  ai-pilot delegate claude \"Fix null pointer in src/auth.ts line 42\""
+    echo ""
+    echo -e "  ${DIM}# Review recent changes${NC}"
+    echo -e "  ai-pilot review src/api/user.ts src/api/auth.ts"
+    echo ""
+    echo -e "  ${DIM}# Check worker status${NC}"
+    echo -e "  ai-pilot status"
+    echo ""
+}
+
+cmd_version() {
+    echo "ai-pilot v$VERSION"
+}
+
+cmd_init() {
+    local SCRIPT_DIR
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+    
+    if [ -d ".agent" ]; then
+        warn ".agent/ already exists in this directory."
+        read -rp "   Overwrite? (y/N) " choice < /dev/tty
+        if [[ ! "$choice" =~ ^[Yy]$ ]]; then
+            info "Aborted."
+            exit 0
+        fi
+        rm -rf ".agent"
+    fi
+    
+    if [ -d "$SCRIPT_DIR/.agent" ]; then
+        cp -r "$SCRIPT_DIR/.agent" ".agent"
+        success "Installed .agent/ into $(pwd)"
+    else
+        info "Downloading from GitHub..."
+        TEMP_DIR=$(mktemp -d)
+        trap 'rm -rf "$TEMP_DIR"' EXIT
+        git clone --quiet --depth 1 https://github.com/manhpd98/ai-pilot.git "$TEMP_DIR/ai-pilot" 2>/dev/null
+        cp -r "$TEMP_DIR/ai-pilot/.agent" ".agent"
+        success "Installed .agent/ into $(pwd)"
+    fi
+    
+    echo ""
+    info "Next: Open in VS Code with Antigravity and say:"
+    echo -e "   ${CYAN}\"Fix the login bug — delegate to Claude Code\"${NC}"
+}
+
+cmd_status() {
+    echo ""
+    echo -e "${BOLD}🤖 AI Pilot Status${NC}"
+    echo ""
+    
+    # Check .agent
+    if [ -d ".agent" ]; then
+        success ".agent/ directory found"
+    else
+        warn ".agent/ not found — run ${CYAN}ai-pilot init${NC}"
+    fi
+    echo ""
+    
+    # Check workers
+    echo -e "${BOLD}AI Workers:${NC}"
+    
+    local count=0
+    
+    if command -v claude &>/dev/null; then
+        success "Claude Code   $(claude --version 2>/dev/null || echo '(installed)')"
+        ((count++)) || true
+    else
+        echo -e "  ${DIM}○ Claude Code   — not installed${NC}"
+        echo -e "    ${DIM}npm install -g @anthropic-ai/claude-code${NC}"
+    fi
+    
+    if command -v opencode &>/dev/null; then
+        success "OpenCode      $(opencode --version 2>/dev/null || echo '(installed)')"
+        ((count++)) || true
+    else
+        echo -e "  ${DIM}○ OpenCode      — not installed${NC}"
+        echo -e "    ${DIM}curl -fsSL https://opencode.ai/install | bash${NC}"
+    fi
+    
+    if command -v aider &>/dev/null; then
+        success "Aider         $(aider --version 2>/dev/null || echo '(installed)')"
+        ((count++)) || true
+    else
+        echo -e "  ${DIM}○ Aider         — not installed${NC}"
+        echo -e "    ${DIM}pip install aider-chat${NC}"
+    fi
+    
+    echo ""
+    if [ "$count" -eq 0 ]; then
+        warn "No AI workers found. Install at least one to start delegating."
+    else
+        success "$count worker(s) ready"
+    fi
+    echo ""
+}
+
+cmd_delegate() {
+    ensure_project
+    
+    if [ $# -lt 2 ]; then
+        error "Usage: ai-pilot delegate <worker> \"<task>\""
+        echo ""
+        echo -e "  Workers: ${CYAN}claude${NC}, ${CYAN}opencode${NC}, ${CYAN}aider${NC}"
+        echo ""
+        echo -e "  Example: ai-pilot delegate claude \"Fix null pointer in auth.ts\""
+        exit 1
+    fi
+    
+    local worker="$1"
+    local task="$2"
+    
+    # Validate task is not empty
+    if [ -z "$task" ]; then
+        error "Task cannot be empty."
+        exit 1
+    fi
+    
+    echo ""
+    echo -e "${BOLD}🤖 AI Pilot — Delegating Task${NC}"
+    echo -e "  Worker: ${CYAN}$worker${NC}"
+    echo -e "  Task:   $task"
+    echo ""
+    
+    log_session "$worker" "$task" "started"
+    
+    # Validate worker exists before running
+    case "$worker" in
+        claude)
+            if ! command -v claude &>/dev/null; then
+                error "Claude Code is not installed."
+                echo -e "  Install: ${CYAN}npm install -g @anthropic-ai/claude-code${NC}"
+                exit 1
+            fi
+            ;;
+        opencode)
+            if ! command -v opencode &>/dev/null; then
+                error "OpenCode is not installed."
+                echo -e "  Install: ${CYAN}curl -fsSL https://opencode.ai/install | bash${NC}"
+                exit 1
+            fi
+            ;;
+        aider)
+            if ! command -v aider &>/dev/null; then
+                error "Aider is not installed."
+                echo -e "  Install: ${CYAN}pip install aider-chat${NC}"
+                exit 1
+            fi
+            ;;
+        *)
+            error "Unknown worker: $worker"
+            echo -e "  Available: ${CYAN}claude${NC}, ${CYAN}opencode${NC}, ${CYAN}aider${NC}"
+            exit 1
+            ;;
+    esac
+    
+    # Disable errexit to capture exit code properly
+    local exit_code=0
+    set +e
+    
+    case "$worker" in
+        claude)
+            info "Sending to Claude Code..."
+            echo ""
+            claude -p "$task"
+            ;;
+        opencode)
+            info "Sending to OpenCode..."
+            echo ""
+            opencode run "$task"
+            ;;
+        aider)
+            info "Sending to Aider..."
+            echo ""
+            aider --message "$task" --yes
+            ;;
+    esac
+    exit_code=$?
+    
+    set -e
+    
+    if [ $exit_code -eq 0 ]; then
+        log_session "$worker" "$task" "completed"
+        echo ""
+        success "Task completed by $worker"
+    else
+        log_session "$worker" "$task" "failed"
+        echo ""
+        error "Task failed (exit code: $exit_code)"
+    fi
+}
+
+cmd_review() {
+    ensure_project
+
+    local worker_override=""
+    if [ $# -gt 0 ] && [ "$1" = "--worker" ]; then
+        shift
+        if [ $# -eq 0 ]; then
+            error "--worker requires a worker name (claude, opencode, aider)"
+            exit 1
+        fi
+        worker_override="$1"
+        shift
+    fi
+
+    local files=("$@")
+    
+    if [ ${#files[@]} -eq 0 ]; then
+        # Default: review recent git changes
+        if command -v git &>/dev/null && git rev-parse --git-dir &>/dev/null 2>&1; then
+            while IFS= read -r f; do [ -n "$f" ] && files+=("$f"); done < <(git diff --name-only HEAD 2>/dev/null)
+            if [ ${#files[@]} -eq 0 ]; then
+                while IFS= read -r f; do [ -n "$f" ] && files+=("$f"); done < <(git diff --name-only HEAD~1 2>/dev/null)
+            fi
+        fi
+        
+        if [ ${#files[@]} -eq 0 ]; then
+            error "No files specified and no git changes found."
+            echo -e "  Usage: ${CYAN}ai-pilot review file1.ts file2.ts${NC}"
+            exit 1
+        fi
+        
+        info "Reviewing ${#files[@]} recently changed file(s)..."
+    fi
+    
+    echo ""
+    echo -e "${BOLD}🔍 AI Code Review${NC}"
+    echo -e "  Files: ${files[*]}"
+    echo ""
+    
+    local file_list
+    file_list=$(printf '- %s\n' "${files[@]}")
+    
+    local prompt="Review the following files for bugs, security issues, performance problems, and code style:
+
+$file_list
+
+For each finding, provide:
+- Severity: CRITICAL / WARNING / INFO
+- File and line number
+- Description
+- Suggested fix"
+    
+    # Use specified worker or auto-detect
+    if [ -n "$worker_override" ]; then
+        case "$worker_override" in
+            claude)
+                if ! command -v claude &>/dev/null; then
+                    error "Claude Code is not installed."
+                    exit 1
+                fi
+                info "Using Claude Code for review..."
+                echo ""
+                claude -p "$prompt"
+                ;;
+            opencode)
+                if ! command -v opencode &>/dev/null; then
+                    error "OpenCode is not installed."
+                    exit 1
+                fi
+                info "Using OpenCode for review..."
+                echo ""
+                opencode run "$prompt"
+                ;;
+            aider)
+                if ! command -v aider &>/dev/null; then
+                    error "Aider is not installed."
+                    exit 1
+                fi
+                info "Using Aider for review..."
+                echo ""
+                aider --message "$prompt" --yes
+                ;;
+            *)
+                error "Unknown worker: $worker_override"
+                echo -e "  Available: ${CYAN}claude${NC}, ${CYAN}opencode${NC}, ${CYAN}aider${NC}"
+                exit 1
+                ;;
+        esac
+    elif command -v claude &>/dev/null; then
+        info "Using Claude Code for review..."
+        echo ""
+        claude -p "$prompt"
+    elif command -v opencode &>/dev/null; then
+        info "Using OpenCode for review..."
+        echo ""
+        opencode run "$prompt"
+    elif command -v aider &>/dev/null; then
+        info "Using Aider for review..."
+        echo ""
+        aider --message "$prompt" --yes
+    else
+        error "No AI worker found. Install one: claude, opencode, or aider"
+        exit 1
+    fi
+}
+
+cmd_log() {
+    if [ ! -d "$LOG_DIR" ]; then
+        info "No delegation logs found yet."
+        echo -e "  Logs are created when you use ${CYAN}ai-pilot delegate${NC}"
+        exit 0
+    fi
+    
+    echo ""
+    echo -e "${BOLD}📋 Recent Delegation Sessions${NC}"
+    echo ""
+    
+    # Show last 20 entries sorted by timestamp
+    cat "$LOG_DIR"/*.log 2>/dev/null | sort | tail -n 20 | while IFS= read -r line; do
+        if [[ "$line" == *"status=completed"* ]]; then
+            echo -e "  ${GREEN}●${NC} $line"
+        elif [[ "$line" == *"status=failed"* ]]; then
+            echo -e "  ${RED}●${NC} $line"
+        elif [[ "$line" == *"status=started"* ]]; then
+            echo -e "  ${YELLOW}●${NC} $line"
+        else
+            echo "  $line"
+        fi
+    done
+    echo ""
+}
+
+cmd_update() {
+    ensure_project
+
+    info "Updating .agent/ from GitHub..."
+    echo ""
+
+    local temp_dir
+    temp_dir=$(mktemp -d)
+    trap 'rm -rf "$temp_dir"' EXIT
+
+    if ! git clone --quiet --depth 1 https://github.com/manhpd98/ai-pilot.git "$temp_dir/ai-pilot" 2>/dev/null; then
+        error "Failed to clone from GitHub."
+        exit 1
+    fi
+
+    if [ ! -d "$temp_dir/ai-pilot/.agent" ]; then
+        error "No .agent/ found in the repository."
+        exit 1
+    fi
+
+    # Show what changed
+    if command -v diff &>/dev/null; then
+        local changes
+        changes=$(diff -rq .agent "$temp_dir/ai-pilot/.agent" 2>/dev/null || true)
+        if [ -z "$changes" ]; then
+            success "Already up to date."
+            exit 0
+        fi
+        echo -e "${BOLD}Changes:${NC}"
+        echo "$changes"
+        echo ""
+    fi
+
+    rm -rf .agent
+    cp -r "$temp_dir/ai-pilot/.agent" .agent
+
+    success "Updated .agent/ to latest version."
+}
+
+cmd_uninstall() {
+    echo ""
+    echo -e "${BOLD}🗑  AI Pilot — Uninstall${NC}"
+    echo ""
+
+    if [ ! -d ".agent" ] && [ ! -d "$LOG_DIR" ]; then
+        info "Nothing to uninstall — no .agent/ or logs found."
+        exit 0
+    fi
+
+    if [ -d ".agent" ]; then
+        read -rp "   Remove .agent/ directory? (y/N) " choice < /dev/tty
+        if [[ "$choice" =~ ^[Yy]$ ]]; then
+            rm -rf .agent
+            success "Removed .agent/"
+        else
+            info "Skipped .agent/"
+        fi
+    fi
+
+    if [ -d "$LOG_DIR" ]; then
+        read -rp "   Remove .ai-pilot/logs/ directory? (y/N) " choice < /dev/tty
+        if [[ "$choice" =~ ^[Yy]$ ]]; then
+            rm -rf "$LOG_DIR"
+            # Remove parent .ai-pilot/ if empty
+            rmdir .ai-pilot 2>/dev/null || true
+            success "Removed logs"
+        else
+            info "Skipped logs"
+        fi
+    fi
+
+    echo ""
+    success "Uninstall complete."
+}
+
+# ─────────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────────
+COMMAND="${1:-help}"
+shift || true
+
+case "$COMMAND" in
+    init)       cmd_init "$@" ;;
+    delegate)   cmd_delegate "$@" ;;
+    review)     cmd_review "$@" ;;
+    status)     cmd_status "$@" ;;
+    log|logs)   cmd_log "$@" ;;
+    update)     cmd_update "$@" ;;
+    uninstall)  cmd_uninstall "$@" ;;
+    help|--help|-h) cmd_help ;;
+    version|--version|-v) cmd_version ;;
+    *)
+        error "Unknown command: $COMMAND"
+        echo -e "  Run ${CYAN}ai-pilot help${NC} for usage."
+        exit 1
+        ;;
+esac
